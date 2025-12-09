@@ -31,27 +31,15 @@ Table.schema: 'tenant_a'                  # Correct!
 
 ## The Solution
 
-You need to update the `schema` attribute on each `Table` object and re-register it with the metadata:
+Clone the metadata with the desired schema using `table.to_metadata()`:
 
 ```python
-def update_metadata_schema(metadata: MetaData, schema: str) -> None:
-    """Update schema on all Table objects in metadata."""
-    tables = list(metadata.tables.values())
-
-    for table in tables:
-        if table.schema == schema:
-            continue
-
-        # Remove from metadata's registry
-        metadata.remove(table)
-
-        # Update the table's schema
-        table.schema = schema
-
-        # Re-register (updates the key in metadata.tables)
-        metadata._add_table(table.name, schema, table)
-
-    metadata.schema = schema
+def clone_metadata_with_schema(source_metadata: MetaData, schema: str) -> MetaData:
+    """Create a new MetaData with all tables from source, applying the schema."""
+    new_metadata = MetaData(schema=schema)
+    for table in source_metadata.tables.values():
+        table.to_metadata(new_metadata, schema=schema)
+    return new_metadata
 ```
 
 ## Project Structure
@@ -65,8 +53,7 @@ def update_metadata_schema(metadata: MetaData, schema: str) -> None:
 │   │       └── test.py      # Example model
 │   └── consumer/            # Consumer package that uses models
 │       ├── alembic/
-│       │   ├── env.py       # Broken: just sets metadata.schema
-│       │   └── env_fixed.py # Fixed: updates Table objects
+│       │   └── env.py       # Uses clone_metadata_with_schema()
 │       └── alembic.ini
 ├── scripts/
 │   ├── demonstrate_problem.py   # Shows the issue
@@ -77,19 +64,67 @@ def update_metadata_schema(metadata: MetaData, schema: str) -> None:
 
 ## Quick Start
 
-```bash
-# Run the demonstration scripts
-./scripts/run_demo.sh
+### Prerequisites
 
-# Or run with PostgreSQL and Alembic
-./scripts/run_alembic_demo.sh
+- Python 3.10+
+- Docker (for PostgreSQL)
+
+### Run the demonstration scripts (no database needed)
+
+```bash
+# Create virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
+
+# Install dependencies
+pip install -e packages/models
+pip install -e packages/consumer
+
+# Run the problem demonstration
+python scripts/demonstrate_problem.py
+
+# Run solutions (all or specific ones)
+python scripts/demonstrate_solution.py --list    # List available solutions
+python scripts/demonstrate_solution.py           # Run all solutions
+python scripts/demonstrate_solution.py 4         # Run solution 4 only
+```
+
+### Run with PostgreSQL and Alembic
+
+```bash
+# Start PostgreSQL (uses port 5433 to avoid conflicts)
+docker compose up -d
+
+# Wait for PostgreSQL to be ready
+docker compose ps
+
+# Set up environment
+source .venv/bin/activate
+pip install -e packages/models
+pip install -e packages/consumer
+
+# Generate a migration with the correct schema
+cd packages/consumer
+TARGET_SCHEMA=tenant_a alembic revision --autogenerate -m "initial"
+
+# Check that the migration includes schema='tenant_a'
+cat alembic/versions/*.py
+
+# Run the migration
+TARGET_SCHEMA=tenant_a alembic upgrade head
+
+# Clean up
+cd ../..
+docker compose down -v
 ```
 
 ## Alternative Solutions
 
-### 1. Update Table schemas at runtime (recommended for your case)
+The `demonstrate_solution.py` script shows 4 different approaches:
 
-Use the `update_metadata_schema()` function in your Alembic `env.py`. This works when you can't modify the model definitions.
+### 1. Update Table schemas at runtime
+
+Mutates existing Table objects. Works but modifies the original metadata.
 
 ### 2. Set schema at model definition time
 
@@ -106,19 +141,20 @@ class Base(DeclarativeBase):
     metadata = MetaData(schema="tenant_a")  # Default schema for new tables
 ```
 
-### 4. Factory function for dynamic schemas
+### 4. Clone metadata with new schema (recommended)
 
 ```python
-def create_models_with_schema(schema: str):
-    class DynamicBase(DeclarativeBase):
-        metadata = MetaData(schema=schema)
-
-    class MyModel(DynamicBase):
-        __tablename__ = "my_table"
-        # ... columns
-
-    return DynamicBase, MyModel
+def clone_metadata_with_schema(source_metadata: MetaData, schema: str) -> MetaData:
+    new_metadata = MetaData(schema=schema)
+    for table in source_metadata.tables.values():
+        table.to_metadata(new_metadata, schema=schema)
+    return new_metadata
 ```
+
+This is the recommended approach because:
+- Doesn't mutate the original metadata
+- Multiple consumers can use different schemas simultaneously
+- Clean integration with Alembic's autogenerate
 
 ## Why This Happens
 
